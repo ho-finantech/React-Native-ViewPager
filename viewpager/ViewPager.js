@@ -32,7 +32,9 @@ export default class ViewPager extends Component {
     onPageSelected: null,
     onPageScrollStateChanged: null,
     pageMargin: 0,
-    horizontalScroll: true
+    horizontalScroll: true,
+    setPageOnScrollViewLayoutChanges: true,
+    checkOnScrollStop: false
   };
 
   _scrollState = SCROLL_STATE.idle;
@@ -41,7 +43,7 @@ export default class ViewPager extends Component {
 
   _panResponder = PanResponder.create({
     onStartShouldSetPanResponder: () => true,
-    onMoveShouldSetPanResponder: () => true,
+    onMoveShouldSetPanResponder: this._onMoveShouldSetPanResponder,
     onPanResponderGrant: () => this._setScrollState(SCROLL_STATE.dragging),
     onPanResponderMove: () => null,
     onPanResponderRelease: () => this._setScrollState(SCROLL_STATE.settling),
@@ -55,6 +57,9 @@ export default class ViewPager extends Component {
     this._onPageSelectedOnAndroid = this._onPageSelectedOnAndroid.bind(this);
     this._renderOnIOS = this._renderOnIOS.bind(this);
     this._onScrollOnIOS = this._onScrollOnIOS.bind(this);
+    this._onScrollBeginDrag = this._onScrollBeginDrag.bind(this);
+    this._onScrollEndDrag = this._onScrollEndDrag.bind(this);
+    this._onScrollStop = this._onScrollStop.bind(this);
     this._onScrollViewLayout = this._onScrollViewLayout.bind(this);
     this._childrenWithOverridenStyle = this._childrenWithOverridenStyle.bind(
       this
@@ -62,7 +67,22 @@ export default class ViewPager extends Component {
     this._setScrollState = this._setScrollState.bind(this);
     this.setPageWithoutAnimation = this.setPageWithoutAnimation.bind(this);
     this.setPage = this.setPage.bind(this);
-    this.state = { width: 0, height: 0, page: props.initialPage };
+    this.state = {
+      page: props.initialPage
+    };
+
+    this.width = props.width ? props.width : 0;
+    this.height = props.height ? props.height : 0;
+  }
+
+  componentWillReceiveProps(nextProps) {
+    if (
+      nextProps.height !== this.props.height ||
+      nextProps.width !== this.props.width
+    ) {
+      this.width = nextProps.width;
+      this.height = nextProps.height;
+    }
   }
 
   render() {
@@ -80,6 +100,15 @@ export default class ViewPager extends Component {
     );
   }
 
+  _onMoveShouldSetPanResponder = (event, gestureState) => {
+    if (this.props.horizontalScroll) {
+      const dxAbs = Math.abs(gestureState.dx);
+      return dxAbs > 10;
+    }
+
+    return true;
+  };
+
   _onPageScrollOnAndroid(e) {
     if (this.props.onPageScroll) this.props.onPageScroll(e.nativeEvent);
   }
@@ -94,10 +123,29 @@ export default class ViewPager extends Component {
       Math.max(0, this.props.initialPage),
       childrenCount - 1
     );
+
+    const { checkOnScrollStop } = this.props;
+
+    const onScrollBeginDrag = checkOnScrollStop
+      ? this._onScrollBeginDrag
+      : null;
+    const onScrollEndDrag = checkOnScrollStop ? this._onScrollEndDrag : null;
+
     let needMonitorScroll =
       !!this.props.onPageScroll ||
       !!this.props.onPageSelected ||
       !!this.props.onPageScrollStateChanged;
+
+    let scrollEventThrottle = needMonitorScroll
+      ? this.props.onPageScroll
+        ? 8
+        : 1
+      : 0;
+
+    if (checkOnScrollStop) {
+      scrollEventThrottle = 16;
+    }
+
     let needMonitorTouch = !!this.props.onPageScrollStateChanged;
     let props = {
       ...this.props,
@@ -110,15 +158,18 @@ export default class ViewPager extends Component {
       showsHorizontalScrollIndicator: false,
       showsVerticalScrollIndicator: false,
       children: this._childrenWithOverridenStyle(),
-      contentOffset: { x: this.state.width * initialPage, y: 0 },
+      contentOffset: { x: this.width * initialPage, y: 0 },
       decelerationRate: 0.9,
       onScroll: needMonitorScroll ? this._onScrollOnIOS : null,
-      scrollEventThrottle: needMonitorScroll
-        ? this.props.onPageScroll
-          ? 8
-          : 1
-        : 0
+      onScrollBeginDrag: onScrollBeginDrag,
+      onScrollEndDrag: onScrollEndDrag,
+      scrollEventThrottle: scrollEventThrottle
     };
+
+    if (!this.props.width || !this.props.height) {
+      props.onLayout = this._onScrollViewLayout;
+    }
+
     if (needMonitorTouch)
       props = Object.assign(props, this._panResponder.panHandlers);
     const scrollViewStyle = {
@@ -137,13 +188,59 @@ export default class ViewPager extends Component {
       );
   }
 
+  _onScrollBeginDrag() {
+    this.isUserDragging = true;
+  }
+
+  _onScrollEndDrag() {
+    this.isUserDragging = false;
+  }
+
+  _onScrollStop() {
+    if (this._preScrollX % this.width !== 0 && !this.isUserDragging) {
+      if (this.props.onPageScroll) {
+        const positionRaw = this._preScrollX / this.width;
+
+        const position = Math.round(positionRaw);
+
+        const xPosition = position * this.width;
+
+        this.refs[SCROLLVIEW_REF].scrollTo({
+          x: xPosition,
+          y: 0,
+          animated: true
+        });
+
+        if (this.props.onPageScroll) {
+          this.props.onPageScroll({ offset: 0, position });
+        }
+      }
+    }
+  }
+
   _onScrollOnIOS(e) {
     let { x } = e.nativeEvent.contentOffset,
       offset,
-      position = Math.floor(x / this.state.width);
-    if (x === this._preScrollX) return;
+      position = Math.floor(x / this.width);
+
+    if (x === this._preScrollX) {
+      return;
+    }
+
+    x = Math.min(x, this.width);
+
     this._preScrollX = x;
-    offset = x / this.state.width - position;
+    offset = x / this.width - position;
+
+    if (this.props.checkOnScrollStop) {
+      if (this.onScrollTimeout) {
+        clearTimeout(this.onScrollTimeout);
+      }
+
+      this.onScrollTimeout = setTimeout(() => {
+        this._onScrollStop();
+      }, 160);
+    }
 
     if (this.props.onPageScroll) this.props.onPageScroll({ offset, position });
 
@@ -157,15 +254,22 @@ export default class ViewPager extends Component {
 
   _onScrollViewLayout(event) {
     let { width, height } = event.nativeEvent.layout;
-    this.setState(
-      { width, height },
-      () =>
-        Platform.OS === "ios" && this.setPageWithoutAnimation(this.state.page)
-    );
+
+    this.width = width;
+    this.height = height;
+
+    let forceUpdateCallback = null;
+
+    if (this.props.setPageOnScrollViewLayoutChanges) {
+      forceUpdateCallback = () =>
+        Platform.OS === "ios" && this.setPageWithoutAnimation(this.state.page);
+    }
+
+    this.forceUpdate(forceUpdateCallback);
   }
 
   _childrenWithOverridenStyle() {
-    if (this.state.width === 0 || this.state.height === 0) return null;
+    if (this.width === 0 || this.height === 0) return null;
     return React.Children.map(this.props.children, child => {
       if (!child) return null;
       let newProps = {
@@ -173,8 +277,8 @@ export default class ViewPager extends Component {
         style: [
           child.props.style,
           {
-            width: this.state.width,
-            height: this.state.height,
+            width: this.width,
+            height: this.height,
             position: null
           }
         ],
@@ -205,7 +309,7 @@ export default class ViewPager extends Component {
     this.setState({ page: selectedPage });
     if (this.props.forceScrollView || Platform.OS === "ios")
       this.refs[SCROLLVIEW_REF].scrollTo({
-        x: this.state.width * selectedPage,
+        x: this.width * selectedPage,
         animated: false
       });
     else {
@@ -219,12 +323,20 @@ export default class ViewPager extends Component {
     this.setState({ page: selectedPage });
     if (this.props.forceScrollView || Platform.OS === "ios")
       this.refs[SCROLLVIEW_REF].scrollTo({
-        x: this.state.width * selectedPage
+        x: this.width * selectedPage
       });
     else {
       this.refs[VIEWPAGER_REF].setPage(selectedPage);
       if (this.props.onPageSelected)
         this.props.onPageSelected({ position: selectedPage });
+    }
+  }
+
+  scrollTo(x, y) {
+    const scrollViewRef = this.refs[SCROLLVIEW_REF];
+
+    if (scrollViewRef) {
+      scrollViewRef.scrollTo({ x, y, animated: false });
     }
   }
 }
